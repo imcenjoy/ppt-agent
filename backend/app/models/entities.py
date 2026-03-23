@@ -340,6 +340,7 @@ class ProjectPage(Base):
     research_status: Mapped[str] = mapped_column(default="pending")
     draft_status: Mapped[str] = mapped_column(default="pending")
     design_status: Mapped[str] = mapped_column(default="pending")
+    search_config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     page_search_queries_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     page_search_results_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     page_corpus_digest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

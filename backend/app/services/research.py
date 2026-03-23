@@ -11,7 +11,8 @@ from urllib.parse import urldefrag
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.base import now_utc
+from app.models.base import ensure_utc_datetime, now_utc
+from app.models.base import new_id
 from app.models.entities import (
     BochaSearchCache,
     Citation,
@@ -141,6 +142,7 @@ class ResearchService:
                     "read_status": item.get("read_status") or "pending",
                     "vector_status": item.get("vector_status") or "pending",
                     "source_document_id": item.get("source_document_id"),
+                    "source_kind": item.get("source_kind") or "web",
                 }
             )
         return cards
@@ -361,6 +363,86 @@ class ResearchService:
             "failed_count": len(failed_urls),
             "failed_urls": failed_urls,
         }
+
+    def ingest_manual_references(
+        self,
+        *,
+        collection: SourceCollection,
+        manual_references: list[dict[str, Any]],
+        replace: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if replace:
+            self.clear_collection(collection)
+
+        candidate_sources: list[dict[str, Any]] = []
+        pending_chunk_records: list[dict[str, Any]] = []
+        for index, item in enumerate(manual_references, start=1):
+            title = str(item.get("title") or "").strip() or f"自有参考资料 {index}"
+            content_md = str(item.get("content_md") or "").strip()
+            if not content_md:
+                continue
+            raw_url = str(item.get("url") or "").strip()
+            reference_id = str(item.get("ref_id") or "").strip() or new_id()
+            source_uri = raw_url or f"manual://{collection.id}/{reference_id}"
+            content_hash = self._hash_text(content_md)
+            document = self.session.scalar(
+                select(SourceDocument).where(
+                    SourceDocument.collection_id == collection.id,
+                    SourceDocument.source_uri == source_uri,
+                )
+            )
+            if document is None:
+                document = SourceDocument(
+                    collection_id=collection.id,
+                    source_type="manual",
+                    source_uri=source_uri,
+                    title=title,
+                    markdown_content=content_md,
+                    metadata_json={
+                        "provider": "manual",
+                        "source_kind": "manual",
+                        "reference_id": reference_id,
+                        "url": raw_url,
+                    },
+                    content_hash=content_hash,
+                    status="ready",
+                )
+                self.session.add(document)
+                self.session.flush()
+            else:
+                document.title = title
+                document.markdown_content = content_md
+                document.metadata_json = {
+                    "provider": "manual",
+                    "source_kind": "manual",
+                    "reference_id": reference_id,
+                    "url": raw_url,
+                }
+                document.content_hash = content_hash
+                document.status = "ready"
+                self.session.execute(delete(SourceChunk).where(SourceChunk.source_document_id == document.id))
+                self.session.flush()
+
+            chunks = self._chunk_markdown(document.title, document.markdown_content)
+            pending_chunk_records.extend({"document": document, "chunk": chunk} for chunk in chunks)
+            candidate_sources.append(
+                {
+                    "id": reference_id,
+                    "query_text": "用户自有参考资料",
+                    "query_purpose": "manual_reference",
+                    "search_rank": index,
+                    "title": title,
+                    "url": source_uri,
+                    "snippet": self._clip_excerpt(content_md, limit=220),
+                    "bocha_summary": self._clip_excerpt(content_md, limit=220),
+                    "content_excerpt_md": self._clip_excerpt(content_md, limit=320),
+                    "read_status": "ready",
+                    "vector_status": "pending",
+                    "source_document_id": document.id,
+                    "source_kind": "manual",
+                }
+            )
+        return candidate_sources, pending_chunk_records
 
     def store_chunk_embeddings(
         self,
@@ -620,7 +702,7 @@ class ResearchService:
         query_key = self._query_key(query_text)
         cache = self.session.scalar(select(BochaSearchCache).where(BochaSearchCache.query_key == query_key))
         now = now_utc()
-        if cache and (cache.expires_at is None or cache.expires_at > now):
+        if cache and ((expires_at := ensure_utc_datetime(cache.expires_at)) is None or expires_at > now):
             items = cache.result_json.get("items", [])
             return [SearchResult(**item) for item in items if item.get("url")]
 
@@ -647,7 +729,7 @@ class ResearchService:
         normalized_url = self._normalize_url(url)
         now = now_utc()
         cache = self.session.scalar(select(URLContentCache).where(URLContentCache.normalized_url == normalized_url))
-        if cache and cache.status == "ready" and (cache.expires_at is None or cache.expires_at > now):
+        if cache and cache.status == "ready" and ((expires_at := ensure_utc_datetime(cache.expires_at)) is None or expires_at > now):
             return ReadResult(
                 title=cache.title,
                 markdown_content=cache.markdown_content,

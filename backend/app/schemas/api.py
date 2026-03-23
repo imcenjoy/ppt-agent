@@ -87,6 +87,18 @@ class PageActionRequest(BaseModel):
     replace_existing: bool = True
 
 
+class ManualReferenceInput(BaseModel):
+    ref_id: str | None = None
+    title: str = Field(min_length=1)
+    url: str | None = None
+    content_md: str = Field(min_length=1)
+
+
+class PageSearchConfigPatchRequest(BaseModel):
+    skip_api_search: bool = False
+    manual_references: list[ManualReferenceInput] = Field(default_factory=list)
+
+
 class BatchActionRequest(BaseModel):
     action_type: str
 

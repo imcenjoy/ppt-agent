@@ -80,6 +80,17 @@ WORKFLOW_CONSTRAINTS = [
 SVG_IMAGE_CONTENT_TYPE = "image/svg+xml"
 
 
+@dataclass
+class ExportableSlideAsset:
+    page: ProjectPage
+    svg_markup: str
+    source_kind: str
+
+    @property
+    def filename(self) -> str:
+        return f"{self.page.page_code}.svg"
+
+
 class SvgImagePart(Part):
     def __init__(
         self,
@@ -781,6 +792,12 @@ class PptAgentService:
         self.session.commit()
         return self.serialize_page(page, include_versions=True)
 
+    def patch_page_search_config(self, project_id: str, page_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        page = self._require_page(project_id, page_id)
+        page.search_config_json = self._normalize_page_search_config(payload)
+        self.session.commit()
+        return self.serialize_page(page, include_versions=True)
+
     def patch_page_summary(self, project_id: str, page_id: str, summary_md: str) -> dict[str, Any]:
         page = self._require_page(project_id, page_id)
         page.page_summary_md = summary_md
@@ -978,6 +995,7 @@ class PptAgentService:
             "summary_status": page.summary_status,
             "draft_status": page.draft_status,
             "design_status": page.design_status,
+            "page_search_config": self._normalize_page_search_config(page.search_config_json),
             "page_search_queries": page.page_search_queries_json,
             "page_search_results": page_search_results,
             "page_corpus_digest": page.page_corpus_digest_json,
@@ -1150,6 +1168,33 @@ class PptAgentService:
             return None
         return self.session.get(DesignVersion, page.current_design_version_id)
 
+    def _normalize_page_search_config(self, payload: Any) -> dict[str, Any]:
+        raw_payload = payload if isinstance(payload, dict) else {}
+        raw_references = raw_payload.get("manual_references")
+        manual_references: list[dict[str, str]] = []
+        if isinstance(raw_references, list):
+            for item in raw_references:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url = str(item.get("url") or "").strip()
+                content_md = str(item.get("content_md") or "").strip()
+                ref_id = str(item.get("ref_id") or new_id()).strip()
+                if not title or not content_md:
+                    continue
+                manual_references.append(
+                    {
+                        "ref_id": ref_id,
+                        "title": title,
+                        "url": url,
+                        "content_md": content_md,
+                    }
+                )
+        return {
+            "skip_api_search": bool(raw_payload.get("skip_api_search")),
+            "manual_references": manual_references,
+        }
+
     def _set_project_stage_at_least(self, project: Project, stage: str) -> None:
         if PROJECT_STAGE_ORDER.get(stage, 0) > PROJECT_STAGE_ORDER.get(project.current_stage, 0):
             project.current_stage = stage
@@ -1274,43 +1319,45 @@ class PptAgentService:
         }
 
     def _build_export_archive(self, project_id: str) -> Path:
-        pages = list(self.session.scalars(select(ProjectPage).where(ProjectPage.project_id == project_id).order_by(ProjectPage.sort_order.asc())))
+        exportables = self._collect_exportable_slide_assets(project_id)
         export_path = self.settings.export_path / f"{project_id}.zip"
         export_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(export_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             manifest: list[dict[str, Any]] = []
-            for page in pages:
-                design = self._get_current_design(page)
-                if not design:
-                    continue
-                filename = f"{page.page_code}.svg"
-                archive.writestr(filename, design.design_svg_markup)
-                manifest.append({"page_id": page.id, "page_code": page.page_code, "file": filename})
+            for asset in exportables:
+                archive.writestr(asset.filename, asset.svg_markup)
+                manifest.append({
+                    "page_id": asset.page.id,
+                    "page_code": asset.page.page_code,
+                    "title": self._page_export_title(asset.page),
+                    "file": asset.filename,
+                    "source": asset.source_kind,
+                })
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return export_path
 
     def _build_export_pptx(self, project: Project) -> Path:
-        exportables = self._collect_exportable_designs(project.id)
+        exportables = self._collect_exportable_slide_assets(project.id)
         from pptx import Presentation
 
         presentation = Presentation()
-        slide_width_emu, slide_height_emu = self._presentation_size_from_svg(exportables[0][1].design_svg_markup)
+        slide_width_emu, slide_height_emu = self._presentation_size_from_svg(exportables[0].svg_markup)
         presentation.slide_width = slide_width_emu
         presentation.slide_height = slide_height_emu
         blank_layout = presentation.slide_layouts[6]
         svg_part_cache: dict[str, SvgImagePart] = {}
 
-        for page, design in exportables:
+        for asset in exportables:
             slide = presentation.slides.add_slide(blank_layout)
             left, top, width, height = self._fit_picture_to_slide(
                 slide_width_emu=slide_width_emu,
                 slide_height_emu=slide_height_emu,
-                svg_markup=design.design_svg_markup,
+                svg_markup=asset.svg_markup,
             )
             self._add_svg_picture(
                 slide=slide,
-                svg_markup=design.design_svg_markup,
-                filename=f"{page.page_code}.svg",
+                svg_markup=asset.svg_markup,
+                filename=asset.filename,
                 left=left,
                 top=top,
                 width=width,
@@ -1323,29 +1370,27 @@ class PptAgentService:
         presentation.save(str(export_path))
         return export_path
 
-    def _collect_exportable_designs(self, project_id: str) -> list[tuple[ProjectPage, DesignVersion]]:
+    def _collect_exportable_slide_assets(self, project_id: str) -> list[ExportableSlideAsset]:
         pages = list(
             self.session.scalars(
                 select(ProjectPage).where(ProjectPage.project_id == project_id).order_by(ProjectPage.sort_order.asc())
             )
         )
-        exportables: list[tuple[ProjectPage, DesignVersion]] = []
-        missing_pages: list[str] = []
+        exportables: list[ExportableSlideAsset] = []
         for page in pages:
             design = self._get_current_design(page)
-            if page.design_status != "ready" or not design or not design.design_svg_markup.strip():
-                missing_pages.append(f"{page.sort_order}. {self._page_export_title(page)}")
+            if design and design.design_svg_markup.strip():
+                exportables.append(ExportableSlideAsset(page=page, svg_markup=design.design_svg_markup, source_kind="design"))
                 continue
-            exportables.append((page, design))
-        if missing_pages:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"以下页面还没有完成设计稿，无法导出 PPTX: {'；'.join(missing_pages)}",
-            )
+
+            draft = self._get_current_draft(page)
+            if draft and draft.draft_svg_markup.strip():
+                exportables.append(ExportableSlideAsset(page=page, svg_markup=draft.draft_svg_markup, source_kind="draft"))
+
         if not exportables:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="当前项目没有可导出的设计稿页面",
+                detail="当前项目没有可导出的页面，请至少先生成一页初稿或设计稿",
             )
         return exportables
 
@@ -2061,8 +2106,11 @@ class PptAgentService:
     ) -> dict[str, Any]:
         if page.page_role != "content":
             raise RuntimeError("固定页不需要页级搜索")
+        search_config = self._normalize_page_search_config(page.search_config_json)
+        manual_references = search_config["manual_references"]
+        skip_api_search = search_config["skip_api_search"]
         queries = page.page_search_queries_json
-        if not queries:
+        if not skip_api_search and not queries:
             if run is not None:
                 run.step_started("page_search_prepare_queries", "补齐页面搜索词", "当前页还没有搜索词，先自动补齐。")
             queries = self._run_page_query_generation(
@@ -2081,6 +2129,9 @@ class PptAgentService:
                 )
                 run.step_completed("page_search_prepare_queries", "补齐页面搜索词", {"query_count": len(queries)})
         page.search_status = "running"
+        collection = self.research.get_or_create_page_collection(project, page)
+        if replace_existing and (search_config["manual_references"] or not skip_api_search):
+            self.research.clear_collection(collection)
         if run is not None:
             run.data_updated(
                 {
@@ -2088,9 +2139,15 @@ class PptAgentService:
                     "page_id": page.id,
                     "update_kind": "search_started",
                     "query_count": len(queries),
+                    "manual_reference_count": len(manual_references),
+                    "skip_api_search": skip_api_search,
                 }
             )
-            run.step_started("page_search_bocha", "执行 Bocha 搜索", "先获取搜索摘要结果，再决定后续抓取。")
+            run.step_started(
+                "page_search_bocha",
+                "执行 Bocha 搜索",
+                "先获取搜索摘要结果，再决定后续抓取。" if not skip_api_search else "当前页已设置跳过 API 检索，将只使用自有参考资料。",
+            )
 
         def on_query_completed(payload: dict[str, Any]) -> None:
             page.page_search_results_json = payload["items"]
@@ -2116,16 +2173,20 @@ class PptAgentService:
                     result={"result_count": payload["result_count"]},
                 )
 
-        search_results = self.research.search_query_summaries(
-            queries,
-            limit_per_query=4,
-            on_query_completed=on_query_completed if run is not None else None,
-        )
+        search_results: list[dict[str, Any]] = []
+        if skip_api_search:
+            if run is not None:
+                run.step_completed("page_search_bocha", "执行 Bocha 搜索", {"result_count": 0, "skipped_api_search": True})
+        else:
+            search_results = self.research.search_query_summaries(
+                queries,
+                limit_per_query=4,
+                on_query_completed=on_query_completed if run is not None else None,
+            )
+            if run is not None:
+                run.step_completed("page_search_bocha", "执行 Bocha 搜索", {"result_count": len(search_results)})
         if run is not None:
-            run.step_completed("page_search_bocha", "执行 Bocha 搜索", {"result_count": len(search_results)})
-        collection = self.research.get_or_create_page_collection(project, page)
-        if run is not None:
-            run.step_started("page_search_read", "抓取全文并写入资料池", "把搜索结果扩展成可引用正文。")
+            run.step_started("page_search_read", "抓取全文并写入资料池", "把联网结果和手动资料统一写入页级资料池。")
 
         def on_read_progress(payload: dict[str, Any]) -> None:
             if run is None:
@@ -2144,13 +2205,33 @@ class PptAgentService:
                 },
             )
 
-        candidate_sources, pending_chunk_records, read_summary = self.research.hydrate_search_results(
+        candidate_sources: list[dict[str, Any]] = []
+        pending_chunk_records: list[dict[str, Any]] = []
+        read_summary = {"ingested_count": 0, "failed_count": 0, "failed_urls": []}
+        if search_results:
+            candidate_sources, pending_chunk_records, read_summary = self.research.hydrate_search_results(
+                collection=collection,
+                search_results=search_results,
+                replace=False,
+                on_read_progress=on_read_progress if run is not None else None,
+            )
+        manual_candidate_sources, manual_chunk_records = self.research.ingest_manual_references(
             collection=collection,
-            search_results=search_results,
-            replace=replace_existing,
-            on_read_progress=on_read_progress if run is not None else None,
+            manual_references=manual_references,
+            replace=False,
         )
+        candidate_sources.extend(manual_candidate_sources)
+        pending_chunk_records.extend(manual_chunk_records)
         candidate_sources = self.research.refresh_search_result_cards(candidate_sources)
+        if not candidate_sources:
+            existing_candidates = self.research.refresh_search_result_cards(page.page_search_results_json or [])
+            existing_digest = self.research.build_collection_digest(collection.id)
+            if skip_api_search and existing_candidates and existing_digest.get("document_count"):
+                page.page_search_results_json = existing_candidates
+                page.page_corpus_digest_json = existing_digest
+                page.search_status = "ready"
+                return {"query_count": len(queries), "result_count": len(existing_candidates), **existing_digest}
+            raise RuntimeError("当前页没有可用资料。请补充自有参考资料，或关闭“跳过 API 检索”后再搜索。")
         page.page_search_results_json = candidate_sources
         read_ready = sum(1 for item in candidate_sources if item.get("read_status") in {"ready", "reused"})
         read_failed = sum(1 for item in candidate_sources if item.get("read_status") == "failed")
@@ -2163,6 +2244,7 @@ class PptAgentService:
                     "result_count": len(candidate_sources),
                     "read_ready": read_ready,
                     "read_failed": read_failed,
+                    "manual_reference_count": len(manual_candidate_sources),
                 }
             )
             run.step_completed(
@@ -2172,6 +2254,7 @@ class PptAgentService:
                     "result_count": len(candidate_sources),
                     "read_ready": read_ready,
                     "read_failed": read_failed,
+                    "manual_reference_count": len(manual_candidate_sources),
                 },
             )
 
@@ -2205,7 +2288,11 @@ class PptAgentService:
             session_role="page_search",
             research_goal=f"为页面《{self._get_current_brief(page).title if self._get_current_brief(page) else page.page_code}》建立独立资料池。",
             query_plan=queries,
-            context_snapshot={"latest_instruction": latest_instruction},
+            context_snapshot={
+                "latest_instruction": latest_instruction,
+                "skip_api_search": skip_api_search,
+                "manual_reference_count": len(manual_references),
+            },
         )
         session.candidate_sources_json = candidate_sources
         session.status = "completed" if digest.get("document_count") else "failed"
@@ -2225,6 +2312,8 @@ class PptAgentService:
                     "update_kind": "search_vectorized",
                     "document_count": digest.get("document_count", 0),
                     "chunk_count": digest.get("chunk_count", 0),
+                    "manual_reference_count": len(manual_candidate_sources),
+                    "skip_api_search": skip_api_search,
                 }
             )
             run.step_completed(
@@ -2233,10 +2322,18 @@ class PptAgentService:
                 {
                     "document_count": digest.get("document_count", 0),
                     "chunk_count": digest.get("chunk_count", 0),
+                    "manual_reference_count": len(manual_candidate_sources),
+                    "skip_api_search": skip_api_search,
                     **embedding_stats,
                 },
             )
-        return {"query_count": len(queries), "result_count": len(candidate_sources), **digest}
+        return {
+            "query_count": len(queries),
+            "result_count": len(candidate_sources),
+            "manual_reference_count": len(manual_candidate_sources),
+            "skip_api_search": skip_api_search,
+            **digest,
+        }
 
     def _run_page_summary(
         self,
