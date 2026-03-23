@@ -80,6 +80,17 @@ WORKFLOW_CONSTRAINTS = [
 SVG_IMAGE_CONTENT_TYPE = "image/svg+xml"
 
 
+@dataclass
+class ExportableSlideAsset:
+    page: ProjectPage
+    svg_markup: str
+    source_kind: str
+
+    @property
+    def filename(self) -> str:
+        return f"{self.page.page_code}.svg"
+
+
 class SvgImagePart(Part):
     def __init__(
         self,
@@ -1274,43 +1285,45 @@ class PptAgentService:
         }
 
     def _build_export_archive(self, project_id: str) -> Path:
-        pages = list(self.session.scalars(select(ProjectPage).where(ProjectPage.project_id == project_id).order_by(ProjectPage.sort_order.asc())))
+        exportables = self._collect_exportable_slide_assets(project_id)
         export_path = self.settings.export_path / f"{project_id}.zip"
         export_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(export_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             manifest: list[dict[str, Any]] = []
-            for page in pages:
-                design = self._get_current_design(page)
-                if not design:
-                    continue
-                filename = f"{page.page_code}.svg"
-                archive.writestr(filename, design.design_svg_markup)
-                manifest.append({"page_id": page.id, "page_code": page.page_code, "file": filename})
+            for asset in exportables:
+                archive.writestr(asset.filename, asset.svg_markup)
+                manifest.append({
+                    "page_id": asset.page.id,
+                    "page_code": asset.page.page_code,
+                    "title": self._page_export_title(asset.page),
+                    "file": asset.filename,
+                    "source": asset.source_kind,
+                })
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return export_path
 
     def _build_export_pptx(self, project: Project) -> Path:
-        exportables = self._collect_exportable_designs(project.id)
+        exportables = self._collect_exportable_slide_assets(project.id)
         from pptx import Presentation
 
         presentation = Presentation()
-        slide_width_emu, slide_height_emu = self._presentation_size_from_svg(exportables[0][1].design_svg_markup)
+        slide_width_emu, slide_height_emu = self._presentation_size_from_svg(exportables[0].svg_markup)
         presentation.slide_width = slide_width_emu
         presentation.slide_height = slide_height_emu
         blank_layout = presentation.slide_layouts[6]
         svg_part_cache: dict[str, SvgImagePart] = {}
 
-        for page, design in exportables:
+        for asset in exportables:
             slide = presentation.slides.add_slide(blank_layout)
             left, top, width, height = self._fit_picture_to_slide(
                 slide_width_emu=slide_width_emu,
                 slide_height_emu=slide_height_emu,
-                svg_markup=design.design_svg_markup,
+                svg_markup=asset.svg_markup,
             )
             self._add_svg_picture(
                 slide=slide,
-                svg_markup=design.design_svg_markup,
-                filename=f"{page.page_code}.svg",
+                svg_markup=asset.svg_markup,
+                filename=asset.filename,
                 left=left,
                 top=top,
                 width=width,
@@ -1323,29 +1336,27 @@ class PptAgentService:
         presentation.save(str(export_path))
         return export_path
 
-    def _collect_exportable_designs(self, project_id: str) -> list[tuple[ProjectPage, DesignVersion]]:
+    def _collect_exportable_slide_assets(self, project_id: str) -> list[ExportableSlideAsset]:
         pages = list(
             self.session.scalars(
                 select(ProjectPage).where(ProjectPage.project_id == project_id).order_by(ProjectPage.sort_order.asc())
             )
         )
-        exportables: list[tuple[ProjectPage, DesignVersion]] = []
-        missing_pages: list[str] = []
+        exportables: list[ExportableSlideAsset] = []
         for page in pages:
             design = self._get_current_design(page)
-            if page.design_status != "ready" or not design or not design.design_svg_markup.strip():
-                missing_pages.append(f"{page.sort_order}. {self._page_export_title(page)}")
+            if design and design.design_svg_markup.strip():
+                exportables.append(ExportableSlideAsset(page=page, svg_markup=design.design_svg_markup, source_kind="design"))
                 continue
-            exportables.append((page, design))
-        if missing_pages:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"以下页面还没有完成设计稿，无法导出 PPTX: {'；'.join(missing_pages)}",
-            )
+
+            draft = self._get_current_draft(page)
+            if draft and draft.draft_svg_markup.strip():
+                exportables.append(ExportableSlideAsset(page=page, svg_markup=draft.draft_svg_markup, source_kind="draft"))
+
         if not exportables:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="当前项目没有可导出的设计稿页面",
+                detail="当前项目没有可导出的页面，请至少先生成一页初稿或设计稿",
             )
         return exportables
 

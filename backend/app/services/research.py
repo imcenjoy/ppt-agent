@@ -11,7 +11,7 @@ from urllib.parse import urldefrag
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.base import now_utc
+from app.models.base import ensure_utc_datetime, now_utc
 from app.models.entities import (
     BochaSearchCache,
     Citation,
@@ -620,7 +620,7 @@ class ResearchService:
         query_key = self._query_key(query_text)
         cache = self.session.scalar(select(BochaSearchCache).where(BochaSearchCache.query_key == query_key))
         now = now_utc()
-        if cache and (cache.expires_at is None or cache.expires_at > now):
+        if cache and ((expires_at := ensure_utc_datetime(cache.expires_at)) is None or expires_at > now):
             items = cache.result_json.get("items", [])
             return [SearchResult(**item) for item in items if item.get("url")]
 
@@ -647,7 +647,7 @@ class ResearchService:
         normalized_url = self._normalize_url(url)
         now = now_utc()
         cache = self.session.scalar(select(URLContentCache).where(URLContentCache.normalized_url == normalized_url))
-        if cache and cache.status == "ready" and (cache.expires_at is None or cache.expires_at > now):
+        if cache and cache.status == "ready" and ((expires_at := ensure_utc_datetime(cache.expires_at)) is None or expires_at > now):
             return ReadResult(
                 title=cache.title,
                 markdown_content=cache.markdown_content,

@@ -289,6 +289,8 @@ export interface ExportJob {
   updated_at: string;
 }
 
+export type ExportFormat = 'pptx' | 'zip';
+
 export interface ProjectMessage {
   id: string;
   project_id: string;
@@ -545,10 +547,10 @@ export async function runBatchAction(
   });
 }
 
-export async function createExport(projectId: string): Promise<ExportJob> {
+export async function createExport(projectId: string, exportFormat: ExportFormat): Promise<ExportJob> {
   return request<ExportJob>(`/projects/${projectId}/exports`, {
     method: 'POST',
-    body: JSON.stringify({export_format: 'pptx'}),
+    body: JSON.stringify({export_format: exportFormat}),
   });
 }
 

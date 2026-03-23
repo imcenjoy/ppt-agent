@@ -19,6 +19,7 @@ import {
   connectProjectEventStream,
   createExport,
   createMessage,
+  type ExportFormat,
   generatePageDesign,
   generatePageDraft,
   generatePageSearchQueries,
@@ -90,6 +91,7 @@ export default function Editor({
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('pptx');
   const [isDataModalOpen, setIsDataModalOpen] = useState(false);
   const [isStoryboardOpen, setIsStoryboardOpen] = useState(false);
   const [isSavingStoryboard, setIsSavingStoryboard] = useState(false);
@@ -431,6 +433,19 @@ export default function Editor({
   const searchDisabled = activePage?.page_role !== 'content';
   const canPresent = surface !== 'search' && pages.length > 0;
 
+  async function handleExport() {
+    setIsExporting(true);
+    try {
+      const job = await createExport(project.project_id, exportFormat);
+      window.open(getExportDownloadUrl(project.project_id, job.export_id), '_blank', 'noopener,noreferrer');
+      setError(null);
+    } catch (caughtError) {
+      setError(getErrorMessage(caughtError, '导出失败'));
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
   if (project.current_stage === 'outline') {
     return (
       <div className="h-screen flex flex-col bg-[#f8f9fa]">
@@ -484,7 +499,21 @@ export default function Editor({
           <button onClick={() => { void handleOpenPresentation(); }} disabled={!canPresent || isPreparingPresentation} className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 rounded-xl border border-slate-200 disabled:opacity-40">{isPreparingPresentation ? <LoaderCircle size={18} className="animate-spin" /> : <Play size={18} />}放映</button>
           <button onClick={() => void runAction(() => surface === 'search' ? runBatchAction(project.project_id, 'project_batch_search') : surface === 'draft' ? runBatchAction(project.project_id, 'project_batch_draft') : runBatchAction(project.project_id, 'project_batch_design'))} className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 rounded-xl border border-slate-200"><Sparkles size={18} />{surface === 'search' ? '批量搜索' : surface === 'draft' ? '批量初稿' : '批量设计'}</button>
           {surface === 'search' ? <button onClick={() => void runAction(() => runBatchAction(project.project_id, 'project_batch_summary'))} className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 rounded-xl border border-slate-200"><Wand2 size={18} />批量 summary</button> : null}
-          <button onClick={async () => { setIsExporting(true); try { const job = await createExport(project.project_id); window.open(getExportDownloadUrl(project.project_id, job.export_id), '_blank', 'noopener,noreferrer'); setError(null); } catch (caughtError) { setError(getErrorMessage(caughtError, '导出失败')); } finally { setIsExporting(false); } }} disabled={isExporting} className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl disabled:bg-blue-300">{isExporting ? <LoaderCircle size={18} className="animate-spin" /> : <Download size={18} />}导出</button>
+          <div className="flex items-center rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+            {(['pptx', 'zip'] as const).map((item) => (
+              <button
+                key={item}
+                onClick={() => setExportFormat(item)}
+                disabled={isExporting}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  exportFormat === item ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-700'
+                } disabled:opacity-40`}
+              >
+                {item.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => void handleExport()} disabled={isExporting} className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl disabled:bg-blue-300">{isExporting ? <LoaderCircle size={18} className="animate-spin" /> : <Download size={18} />}导出 {exportFormat.toUpperCase()}</button>
         </div>
       </header>
 
