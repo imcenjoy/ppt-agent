@@ -31,6 +31,7 @@ _SCHEMA_UPGRADES: dict[str, list[tuple[str, str]]] = {
         ("outline_status", "TEXT"),
         ("search_status", "TEXT"),
         ("summary_status", "TEXT"),
+        ("search_config_json", "JSON"),
         ("page_search_queries_json", "JSON"),
         ("page_search_results_json", "JSON"),
         ("page_corpus_digest_json", "JSON"),

@@ -270,14 +270,21 @@ export const SearchResultCard: FC<{
   const vectorTone = item.vector_status === 'ready' ? 'blue' : item.vector_status === 'failed' ? 'rose' : 'amber';
   const retryLabel = item.read_status === 'failed' ? '重试正文与向量化' : '重新向量化';
   const showRetry = Boolean(onRetry) && Boolean(allowRetry) && (item.read_status === 'failed' || item.vector_status !== 'ready');
+  const isManualSource = item.source_kind === 'manual' || item.url.startsWith('manual://');
   return (
     <div className="rounded-[1.5rem] border border-slate-200 bg-white p-5 shadow-sm space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-2 min-w-0">
-          <a href={item.url} target="_blank" rel="noreferrer" className="block text-base font-semibold text-blue-600 hover:underline break-words">
-            {item.title}
-          </a>
-          <div className="text-xs text-emerald-600 break-all">{item.url}</div>
+          {isManualSource ? (
+            <div className="block text-base font-semibold text-slate-800 break-words">{item.title}</div>
+          ) : (
+            <a href={item.url} target="_blank" rel="noreferrer" className="block text-base font-semibold text-blue-600 hover:underline break-words">
+              {item.title}
+            </a>
+          )}
+          <div className={`text-xs break-all ${isManualSource ? 'text-violet-600' : 'text-emerald-600'}`}>
+            {isManualSource ? '手动资料' : item.url}
+          </div>
         </div>
         {item.query_purpose ? (
           <span className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200">

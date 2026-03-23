@@ -5,7 +5,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.schemas.api import BatchActionRequest, ExportCreateRequest, PageActionRequest, PageOutlinePatchRequest, SummaryPatchRequest
+from app.schemas.api import (
+    BatchActionRequest,
+    ExportCreateRequest,
+    PageActionRequest,
+    PageOutlinePatchRequest,
+    PageSearchConfigPatchRequest,
+    SummaryPatchRequest,
+)
 from app.services.orchestrator import PptAgentService
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["pages"])
@@ -50,6 +57,16 @@ def patch_page_outline(
     service: PptAgentService = Depends(get_service),
 ) -> dict:
     return service.patch_page_outline(project_id, page_id, payload.model_dump())
+
+
+@router.patch("/pages/{page_id}/search-config")
+def patch_page_search_config(
+    project_id: str,
+    page_id: str,
+    payload: PageSearchConfigPatchRequest,
+    service: PptAgentService = Depends(get_service),
+) -> dict:
+    return service.patch_page_search_config(project_id, page_id, payload.model_dump())
 
 
 @router.post("/pages/{page_id}/search-queries:generate")

@@ -19,6 +19,7 @@ import {
   connectProjectEventStream,
   createExport,
   createMessage,
+  type ManualReference,
   type ExportFormat,
   generatePageDesign,
   generatePageDraft,
@@ -31,6 +32,7 @@ import {
   listMessages,
   listPages,
   patchPageOutline,
+  patchPageSearchConfig,
   patchStoryboard,
   patchPageSummary,
   retryPageSearchResult,
@@ -88,10 +90,13 @@ export default function Editor({
   const [summaryDraft, setSummaryDraft] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingOutline, setIsSavingOutline] = useState(false);
+  const [isSavingSearchConfig, setIsSavingSearchConfig] = useState(false);
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('pptx');
+  const [skipApiSearchDraft, setSkipApiSearchDraft] = useState(false);
+  const [manualReferencesDraft, setManualReferencesDraft] = useState<ManualReference[]>([]);
   const [isDataModalOpen, setIsDataModalOpen] = useState(false);
   const [isStoryboardOpen, setIsStoryboardOpen] = useState(false);
   const [isSavingStoryboard, setIsSavingStoryboard] = useState(false);
@@ -224,6 +229,8 @@ export default function Editor({
     setTitleDraft(activePage.title);
     setBulletDraft(activePage.content_outline.join('\n'));
     setSummaryDraft(activePage.page_summary_md);
+    setSkipApiSearchDraft(Boolean(activePage.page_search_config?.skip_api_search));
+    setManualReferencesDraft(activePage.page_search_config?.manual_references ?? []);
   }, [activePage]);
 
   const handleSaveOutline = async () => {
@@ -258,6 +265,47 @@ export default function Editor({
     } finally {
       setIsSavingSummary(false);
     }
+  };
+
+  const handleSaveSearchConfig = async (): Promise<PageSummary | null> => {
+    if (!activePage || isSavingSearchConfig) return null;
+    setIsSavingSearchConfig(true);
+    try {
+      const nextPage = await patchPageSearchConfig(project.project_id, activePage.page_id, {
+        skip_api_search: skipApiSearchDraft,
+        manual_references: manualReferencesDraft
+          .map((item) => ({
+            ref_id: item.ref_id,
+            title: item.title.trim(),
+            url: item.url?.trim() ?? '',
+            content_md: item.content_md.trim(),
+          }))
+          .filter((item) => item.title && item.content_md),
+      });
+      setActivePage(nextPage);
+      setPages((current) => replacePageSummary(current, nextPage));
+      setError(null);
+      return nextPage;
+    } catch (caughtError) {
+      setError(getErrorMessage(caughtError, '搜索设置保存失败'));
+      return null;
+    } finally {
+      setIsSavingSearchConfig(false);
+    }
+  };
+
+  const handleManualReferenceChange = (index: number, field: keyof ManualReference, value: string) => {
+    setManualReferencesDraft((current) =>
+      current.map((item, itemIndex) => (itemIndex === index ? {...item, [field]: value} : item)),
+    );
+  };
+
+  const handleAddManualReference = () => {
+    setManualReferencesDraft((current) => [...current, {title: '', url: '', content_md: ''}]);
+  };
+
+  const handleRemoveManualReference = (index: number) => {
+    setManualReferencesDraft((current) => current.filter((_, itemIndex) => itemIndex !== index));
   };
 
   const sendMessage = async (content: string, options?: { clearInput?: boolean }) => {
@@ -548,7 +596,52 @@ export default function Editor({
             {surface === 'search' ? (
               <div className="space-y-6">
                 <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm space-y-4">
-                  <div className="flex items-center justify-between"><div><div className="text-lg font-semibold text-slate-800">当前页资料池</div><div className="text-sm text-slate-500 mt-1">Bocha 摘要、全文抓取和向量化状态会持续写回这里。</div></div><div className="text-sm text-slate-500">文档 {activePage?.page_corpus_digest.document_count ?? 0} / chunk {activePage?.page_corpus_digest.chunk_count ?? 0}</div></div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-lg font-semibold text-slate-800">搜索设置</div>
+                      <div className="text-sm text-slate-500 mt-1">可以为当前页补充自己的参考资料，并控制是否跳过 API 检索。</div>
+                    </div>
+                    <button onClick={() => void handleSaveSearchConfig()} disabled={!activePage || searchDisabled || isSavingSearchConfig} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40">
+                      {isSavingSearchConfig ? '保存中...' : '保存搜索设置'}
+                    </button>
+                  </div>
+                  {searchDisabled ? (
+                    <div className="text-sm text-slate-500">固定页不参与页级搜索，无需配置搜索资料。</div>
+                  ) : (
+                    <div className="space-y-4">
+                      <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                        <input type="checkbox" checked={skipApiSearchDraft} onChange={(event) => setSkipApiSearchDraft(event.target.checked)} className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                        <div>
+                          <div className="text-sm font-semibold text-slate-700">跳过 API 检索</div>
+                          <div className="text-sm text-slate-500 mt-1">开启后，这一页搜索时不会调用联网搜索 API，只使用你填写的参考资料和当前页已有资料池。</div>
+                        </div>
+                      </label>
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-700">自有参考资料</div>
+                          <button onClick={handleAddManualReference} type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                            新增资料
+                          </button>
+                        </div>
+                        {manualReferencesDraft.length ? manualReferencesDraft.map((item, index) => (
+                          <div key={item.ref_id ?? `manual-${index}`} className="rounded-2xl border border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-sm font-medium text-slate-700">资料 {index + 1}</div>
+                              <button type="button" onClick={() => handleRemoveManualReference(index)} className="text-xs font-medium text-rose-500 hover:text-rose-600">删除</button>
+                            </div>
+                            <input value={item.title} onChange={(event) => handleManualReferenceChange(index, 'title', event.target.value)} placeholder="资料标题，例如：公司内部白皮书 2025Q1" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                            <input value={item.url ?? ''} onChange={(event) => handleManualReferenceChange(index, 'url', event.target.value)} placeholder="可选：原文链接 / 文档地址" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                            <textarea value={item.content_md} onChange={(event) => handleManualReferenceChange(index, 'content_md', event.target.value)} placeholder="粘贴摘要、会议纪要、内部结论、原文摘录等。这里的内容会直接入库并参与 summary / draft / design。" rows={5} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none resize-y focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                          </div>
+                        )) : (
+                          <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-400">当前页还没有自有参考资料。你可以添加文字摘要、内部结论或文档摘录。</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+                  <div className="flex items-center justify-between"><div><div className="text-lg font-semibold text-slate-800">当前页资料池</div><div className="text-sm text-slate-500 mt-1">联网搜索结果和手动参考资料都会持续写回这里。</div></div><div className="text-sm text-slate-500">文档 {activePage?.page_corpus_digest.document_count ?? 0} / chunk {activePage?.page_corpus_digest.chunk_count ?? 0}</div></div>
                   {searchDisabled ? <div className="text-sm text-slate-500">固定页不参与页级搜索，直接使用大纲结构进入 draft/design。</div> : activePage?.page_search_results.length ? <div className="space-y-4">{activePage.page_search_results.map((item) => <SearchResultCard key={item.id} item={item} onRetry={(sourceId) => { void handleRetrySearchResult(sourceId); }} retrying={Boolean(retryingSearchSourceIds[item.id])} allowRetry={!isPageSearchRunning} />)}</div> : <div className="text-sm text-slate-400">当前页还没有资料池结果。右侧聊天栏会实时显示 agent 进度。</div>}
                 </div>
                 <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm space-y-4">
@@ -566,9 +659,9 @@ export default function Editor({
             <div className="flex flex-wrap gap-2">
               {surface === 'search' ? (
                 <>
-                  <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(() => generatePageSearchQueries(project.project_id, activePage.page_id))} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">生成搜索词</button>
-                  <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(() => runPageSearch(project.project_id, activePage.page_id, 'page_search_run'))} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">搜索</button>
-                  <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(() => runPageSearch(project.project_id, activePage.page_id, 'page_search_refresh'))} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"><RefreshCw size={14} className="inline mr-1" />覆盖重搜</button>
+                  <button disabled={!activePage || searchDisabled || skipApiSearchDraft} onClick={() => activePage && void runAction(async () => { await handleSaveSearchConfig(); await generatePageSearchQueries(project.project_id, activePage.page_id); })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">生成搜索词</button>
+                  <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(async () => { await handleSaveSearchConfig(); await runPageSearch(project.project_id, activePage.page_id, 'page_search_run'); })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">{skipApiSearchDraft ? '仅入库手动资料' : '搜索'}</button>
+                  <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(async () => { await handleSaveSearchConfig(); await runPageSearch(project.project_id, activePage.page_id, 'page_search_refresh'); })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"><RefreshCw size={14} className="inline mr-1" />{skipApiSearchDraft ? '刷新手动资料' : '覆盖重搜'}</button>
                   <button disabled={!activePage || searchDisabled} onClick={() => activePage && void runAction(() => generatePageSummary(project.project_id, activePage.page_id))} className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40">生成 summary</button>
                 </>
               ) : surface === 'draft' ? (

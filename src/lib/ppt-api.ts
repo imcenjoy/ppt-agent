@@ -163,6 +163,19 @@ export interface PageSearchResult {
   read_status?: string;
   vector_status?: string;
   source_document_id?: string | null;
+  source_kind?: string;
+}
+
+export interface ManualReference {
+  ref_id?: string;
+  title: string;
+  url?: string;
+  content_md: string;
+}
+
+export interface PageSearchConfig {
+  skip_api_search: boolean;
+  manual_references: ManualReference[];
 }
 
 export interface PageSummary {
@@ -179,6 +192,7 @@ export interface PageSummary {
   summary_status: string;
   draft_status: string;
   design_status: string;
+  page_search_config: PageSearchConfig;
   page_search_queries: PageSearchQuery[];
   page_search_results: PageSearchResult[];
   page_corpus_digest: CorpusDigest;
@@ -478,6 +492,17 @@ export async function patchPageOutline(
   },
 ): Promise<PageSummary> {
   return request<PageSummary>(`/projects/${projectId}/pages/${pageId}/outline`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function patchPageSearchConfig(
+  projectId: string,
+  pageId: string,
+  payload: PageSearchConfig,
+): Promise<PageSummary> {
+  return request<PageSummary>(`/projects/${projectId}/pages/${pageId}/search-config`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
